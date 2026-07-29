@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.UI;
 
 namespace TowerStatsMod
 {
@@ -25,12 +24,14 @@ namespace TowerStatsMod
         private static readonly List<TowerStatsComponent> _activeTowers = new List<TowerStatsComponent>();
         public static IReadOnlyList<TowerStatsComponent> ActiveTowers => _activeTowers;
 
-        // ─── Single Global Root Canvas (1 Canvas for ALL Towers = 0 FPS Impact) ───
-        private Canvas? _rootCanvas;
-        private RectTransform? _rootCanvasRT;
-        private CanvasScaler? _canvasScaler;
-        private Camera? _cachedCam;
+        // ─── Direct High-Performance IMGUI Styles & Textures (0 Allocations) ───
+        private Texture2D? _bgTexture;
+        private GUIStyle? _boxStyle;
+        private GUIStyle? _killsStyle;
+        private GUIStyle? _dpsStyle;
+        private bool _stylesInitialized;
 
+        private Camera? _cachedCam;
         private static Transform? _cachedLocalPlayerTransform;
         private static float _nextPlayerSearchTime;
 
@@ -60,37 +61,6 @@ namespace TowerStatsMod
                 return;
             }
             _instance = this;
-            EnsureRootCanvas();
-        }
-
-        public void EnsureRootCanvas()
-        {
-            if (_rootCanvas != null && _rootCanvasRT != null) return;
-
-            _rootCanvas = gameObject.GetComponent<Canvas>();
-            if (_rootCanvas == null) _rootCanvas = gameObject.AddComponent<Canvas>();
-
-            _rootCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            _rootCanvas.sortingOrder = 30000; // Render on top of game UI
-
-            _canvasScaler = gameObject.GetComponent<CanvasScaler>();
-            if (_canvasScaler == null) _canvasScaler = gameObject.AddComponent<CanvasScaler>();
-            _canvasScaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            _canvasScaler.referenceResolution = new Vector2(1920f, 1080f);
-
-            _rootCanvasRT = _rootCanvas.GetComponent<RectTransform>();
-        }
-
-        public RectTransform CreateBadgeContainer(string name)
-        {
-            EnsureRootCanvas();
-            var badgeGo = new GameObject(name);
-            badgeGo.transform.SetParent(_rootCanvasRT, false);
-            var rt = badgeGo.AddComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0.5f, 0.5f);
-            rt.anchorMax = new Vector2(0.5f, 0.5f);
-            rt.pivot = new Vector2(0.5f, 0.5f);
-            return rt;
         }
 
         public static void RegisterTower(TowerStatsComponent tower)
@@ -116,12 +86,48 @@ namespace TowerStatsMod
             _nextPlayerSearchTime = 0f;
         }
 
-        private void LateUpdate()
+        private void EnsureStyles()
+        {
+            if (_stylesInitialized && _boxStyle != null && _killsStyle != null && _dpsStyle != null) return;
+
+            // 1. Create dark background texture (RGBA: 10, 15, 25, 230)
+            _bgTexture = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+            _bgTexture.SetPixel(0, 0, new Color(0.04f, 0.06f, 0.10f, 0.90f));
+            _bgTexture.Apply();
+
+            // 2. Box style
+            _boxStyle = new GUIStyle();
+            _boxStyle.normal.background = _bgTexture;
+
+            int fontSz = Plugin.FontSize.Value;
+
+            // 3. Kills text style (White)
+            _killsStyle = new GUIStyle();
+            _killsStyle.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            _killsStyle.fontSize = fontSz;
+            _killsStyle.fontStyle = FontStyle.Bold;
+            _killsStyle.alignment = TextAnchor.MiddleCenter;
+            _killsStyle.normal.textColor = new Color(0.95f, 0.95f, 0.95f, 1f);
+
+            // 4. DPS text style (Cyan glow)
+            _dpsStyle = new GUIStyle();
+            _dpsStyle.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            _dpsStyle.fontSize = fontSz;
+            _dpsStyle.fontStyle = FontStyle.Bold;
+            _dpsStyle.alignment = TextAnchor.MiddleCenter;
+            _dpsStyle.normal.textColor = new Color(0.35f, 0.85f, 1f, 1f);
+
+            _stylesInitialized = true;
+        }
+
+        private void OnGUI()
         {
             if (!Plugin.IsModEnabled || _activeTowers.Count == 0) return;
 
             Camera? cam = GetMainCamera();
             if (cam == null) return;
+
+            EnsureStyles();
 
             Transform? playerT = LocalPlayerTransform;
             float showRadius = Plugin.ShowRadius.Value;
@@ -129,44 +135,43 @@ namespace TowerStatsMod
             float heightOffset = Plugin.HeightOffset.Value;
             Vector3 offsetVec = new Vector3(0f, heightOffset, 0f);
 
+            int screenHeight = Screen.height;
+
             for (int i = 0; i < _activeTowers.Count; i++)
             {
                 var tower = _activeTowers[i];
                 if (tower == null || !tower.gameObject.activeInHierarchy) continue;
 
-                var badgeRT = tower.BadgeRectTransform;
-                if (badgeRT == null) continue;
-
                 // Distance culling check relative to local player hero
-                if (playerT != null && showRadius > 0f)
+                if (playerT != null && showRadiusSqr > 0f)
                 {
                     float sqrDist = (tower.transform.position - playerT.position).sqrMagnitude;
-                    if (sqrDist > showRadiusSqr)
-                    {
-                        if (badgeRT.gameObject.activeSelf) badgeRT.gameObject.SetActive(false);
-                        continue;
-                    }
+                    if (sqrDist > showRadiusSqr) continue;
                 }
 
-                // Screen position calculation
                 Vector3 worldPos = tower.transform.position + offsetVec;
                 Vector3 screenPos = cam.WorldToScreenPoint(worldPos);
 
-                // Check if tower is in front of camera
-                if (screenPos.z > 0f)
-                {
-                    if (!badgeRT.gameObject.activeSelf) badgeRT.gameObject.SetActive(true);
+                // Behind camera check
+                if (screenPos.z <= 0f) continue;
 
-                    // Convert screen position to canvas anchoredPosition
-                    badgeRT.anchoredPosition = new Vector2(
-                        screenPos.x - (Screen.width * 0.5f),
-                        screenPos.y - (Screen.height * 0.5f)
-                    );
-                }
-                else
-                {
-                    if (badgeRT.gameObject.activeSelf) badgeRT.gameObject.SetActive(false);
-                }
+                // Convert Unity screen coordinates (y=0 at bottom) to IMGUI coordinates (y=0 at top)
+                float guiX = screenPos.x;
+                float guiY = screenHeight - screenPos.y;
+
+                float width = tower.BadgeWidth;
+                float height = 48f;
+                Rect boxRect = new Rect(guiX - (width * 0.5f), guiY - (height * 0.5f), width, height);
+
+                // Draw sleek dark background box (Immediate mode = 0 Canvas overhead!)
+                GUI.Box(boxRect, GUIContent.none, _boxStyle!);
+
+                // Draw 2-line text overlay
+                Rect killsRect = new Rect(boxRect.x, boxRect.y + 2f, boxRect.width, 22f);
+                Rect dpsRect = new Rect(boxRect.x, boxRect.y + 22f, boxRect.width, 22f);
+
+                GUI.Label(killsRect, tower.KillsText, _killsStyle!);
+                GUI.Label(dpsRect, tower.DpsText, _dpsStyle!);
             }
         }
 
