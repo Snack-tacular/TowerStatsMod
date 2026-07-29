@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
+using Unity.Netcode;
 using UnityEngine;
 
 namespace TowerStatsMod
@@ -249,7 +250,77 @@ namespace TowerStatsMod
             }
         }
 
-        // ─── Game Statistics Engine Kill Hook ────────────────────────────────
+        private static Unit? FindNearestAttackingTower(Vector3 targetPos)
+        {
+            float minSqDist = 2500f; // Max search radius 50 units (50*50 = 2500)
+            Unit? bestTower = null;
+
+            foreach (var stats in TowerStatsManager.ActiveTowers)
+            {
+                if (stats == null) continue;
+                Unit u = stats.GetComponent<Unit>();
+                if (u != null && IsTower(u) && u.gameObject.activeInHierarchy)
+                {
+                    float sqrD = (u.transform.position - targetPos).sqrMagnitude;
+                    if (sqrD < minSqDist)
+                    {
+                        minSqDist = sqrD;
+                        bestTower = u;
+                    }
+                }
+            }
+
+            return bestTower;
+        }
+
+        // ─── Non-Host Client Multiplayer Hit Receiver Hook ────────────────────
+        [HarmonyPatch(typeof(DamageBatchManager), "ApplyHitLocally")]
+        [HarmonyPostfix]
+        private static void DamageBatchManager_ApplyHitLocally_Postfix(ulong targetNetId, float damage, HitResultType type, bool isBuilding)
+        {
+            if (damage <= 0f) return;
+
+            try
+            {
+                if (NetworkManager.Singleton != null && NetworkManager.Singleton.SpawnManager != null)
+                {
+                    if (NetworkManager.Singleton.SpawnManager.SpawnedObjects.TryGetValue(targetNetId, out var netObj) && netObj != null)
+                    {
+                        int victimId = GetVictimEntityId(netObj);
+
+                        Unit? tower = null;
+                        _lastTowerAttacker.TryGetValue(victimId, out tower);
+
+                        if (tower == null)
+                        {
+                            tower = FindNearestAttackingTower(netObj.transform.position);
+                            if (tower != null)
+                            {
+                                _lastTowerAttacker[victimId] = tower;
+                            }
+                        }
+
+                        if (tower != null)
+                        {
+                            var stats = GetOrCreateTowerStats(tower);
+                            if (stats != null)
+                            {
+                                stats.RecordDamage(damage);
+                            }
+
+                            var victimUnit = netObj.GetComponent<Unit>();
+                            if (victimUnit != null && (victimUnit.IsDead || (victimUnit.Damageable != null && victimUnit.Damageable.CurrentHealth <= 0f)))
+                            {
+                                TryCreditKill(victimId, tower);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // ─── Game Statistics Engine Kill Hook (Server / Host) ────────────────
         [HarmonyPatch(typeof(PlayerStatisticsManager), "OnUnitKilled")]
         [HarmonyPostfix]
         private static void PlayerStatisticsManager_OnUnitKilled_Postfix(Unit victim, Unit killer)

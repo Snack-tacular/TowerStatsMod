@@ -198,7 +198,7 @@ namespace TowerStatsMod
 
             Camera? cam = GetMainCamera();
 
-            // Distance check (safe check: if playerT is null e.g. player dead/respawning, stay visible!)
+            // Distance check relative to THIS CLIENT'S local player character
             float showRadius = Plugin.ShowRadius.Value;
             Transform? playerT = GetPlayerTransform();
             if (playerT != null && showRadius > 0f)
@@ -211,6 +211,7 @@ namespace TowerStatsMod
                 }
             }
 
+            // If player is dead or respawning, playerT is null -> stay active and visible!
             if (!_canvas.gameObject.activeSelf) _canvas.gameObject.SetActive(true);
 
             // Dynamic scale & position updates from config
@@ -220,7 +221,7 @@ namespace TowerStatsMod
             float heightOffset = GetHeightOffset();
             _canvasRT.localPosition = new Vector3(0f, heightOffset, 0f);
 
-            // Rotate canvas to face camera cleanly (matching BuildingLevelDisplay)
+            // Rotate canvas to face camera cleanly
             if (cam != null)
             {
                 Vector3 dir = _canvas.transform.position - cam.transform.position;
@@ -340,7 +341,7 @@ namespace TowerStatsMod
             string dpsFormatted = FormatNumber(CurrentDPS);
             string killsFormatted = Kills.ToString(CultureInfo.InvariantCulture);
 
-            // Matched single-symbol unicode kerning (no extra emoji variation selector padding)
+            // Matched single-symbol unicode kerning
             _killsText.text = $"⚔ Kills: {killsFormatted}";
             _dpsText.text = $"⚡ DPS: {dpsFormatted}";
 
@@ -374,21 +375,65 @@ namespace TowerStatsMod
 
         private static Transform? GetPlayerTransform()
         {
-            // Validate cached player transform (invalidation on death/respawn)
+            // 1. Validate cached local player transform
             if (_cachedPlayerTransform != null)
             {
-                if (_cachedPlayerTransform.gameObject != null && _cachedPlayerTransform.gameObject.activeInHierarchy)
+                try
                 {
-                    var u = _cachedPlayerTransform.GetComponent<Unit>();
-                    if (u == null || !u.IsDead)
+                    if (_cachedPlayerTransform.gameObject != null && _cachedPlayerTransform.gameObject.activeInHierarchy)
                     {
-                        return _cachedPlayerTransform;
+                        var u = _cachedPlayerTransform.GetComponent<Unit>();
+                        if (u != null && !u.IsDead && u.IsLocalPlayer)
+                        {
+                            return _cachedPlayerTransform;
+                        }
                     }
                 }
-                _cachedPlayerTransform = null; // Clear stale reference on death/despawn
+                catch { }
+                _cachedPlayerTransform = null; // Stale or dead reference
             }
 
-            // 1. Resolve via PlayerGameDataManager
+            // 2. Search Units for IsLocalPlayer == true
+            try
+            {
+                var units = FindObjectsByType<Unit>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+                if (units != null)
+                {
+                    foreach (var u in units)
+                    {
+                        if (u != null && u.gameObject.activeInHierarchy && !u.IsDead && u.IsLocalPlayer)
+                        {
+                            _cachedPlayerTransform = u.transform;
+                            return _cachedPlayerTransform;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // 3. Search PlayerInteract for IsLocalPlayer == true
+            try
+            {
+                var interacts = FindObjectsByType<PlayerInteract>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+                if (interacts != null)
+                {
+                    foreach (var pi in interacts)
+                    {
+                        if (pi != null && pi.gameObject.activeInHierarchy && pi.IsLocalPlayer)
+                        {
+                            var u = pi.GetComponent<Unit>();
+                            if (u == null || !u.IsDead)
+                            {
+                                _cachedPlayerTransform = pi.transform;
+                                return _cachedPlayerTransform;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // 4. Fallback to PlayerGameDataManager
             try
             {
                 var pgm = PlayerGameDataManager.I;
@@ -399,28 +444,6 @@ namespace TowerStatsMod
                     {
                         _cachedPlayerTransform = hero.transform;
                         return _cachedPlayerTransform;
-                    }
-                }
-            }
-            catch { }
-
-            // 2. Resolve via PlayerInteract components
-            try
-            {
-                var interacts = FindObjectsByType<PlayerInteract>(FindObjectsSortMode.None);
-                if (interacts != null && interacts.Length > 0)
-                {
-                    foreach (var pi in interacts)
-                    {
-                        if (pi != null && pi.gameObject.activeInHierarchy)
-                        {
-                            var u = pi.GetComponent<Unit>();
-                            if (u == null || !u.IsDead)
-                            {
-                                _cachedPlayerTransform = pi.transform;
-                                return _cachedPlayerTransform;
-                            }
-                        }
                     }
                 }
             }
