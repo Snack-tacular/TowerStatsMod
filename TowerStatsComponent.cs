@@ -25,76 +25,15 @@ namespace TowerStatsMod
         // ─── Rolling window buffer for DPS ───────────────────────────────────
         private readonly Queue<DamageSample> _rollingSamples = new Queue<DamageSample>(128);
 
-        // ─── UI References ───────────────────────────────────────────────────
-        private Canvas? _canvas;
-        private RectTransform? _canvasRT;
+        // ─── UI Badge (Single ScreenSpace Root Canvas Child) ─────────────────
+        public RectTransform? BadgeRectTransform { get; private set; }
         private Text? _killsText;
         private Text? _dpsText;
         private Image? _bgImage;
-        private Camera? _cachedCam;
-
-        // ─── Shared Overlay Materials (Created ONCE for 0 Allocation Overhead) ──
-        private static Material? _textOverlayMat;
-        public static Material TextOverlayMaterial
-        {
-            get
-            {
-                if (_textOverlayMat == null)
-                {
-                    try
-                    {
-                        Shader s = Shader.Find("GUI/Text Shader") ?? Shader.Find("UI/Default");
-                        if (s != null)
-                        {
-                            _textOverlayMat = new Material(s);
-                            _textOverlayMat.name = "TowerStatsTextOverlayMaterial";
-                            _textOverlayMat.SetInt("unity_GUIZTestMode", (int)UnityEngine.Rendering.CompareFunction.Always);
-                            _textOverlayMat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
-                            _textOverlayMat.renderQueue = 3000;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Plugin.Log?.LogWarning($"[TowerStatsMod] Failed to create TextOverlayMaterial: {ex.Message}");
-                    }
-                }
-                return _textOverlayMat!;
-            }
-        }
-
-        private static Material? _imageOverlayMat;
-        public static Material ImageOverlayMaterial
-        {
-            get
-            {
-                if (_imageOverlayMat == null)
-                {
-                    try
-                    {
-                        Shader s = Shader.Find("UI/Default") ?? Shader.Find("Sprites/Default");
-                        if (s != null)
-                        {
-                            _imageOverlayMat = new Material(s);
-                            _imageOverlayMat.name = "TowerStatsImageOverlayMaterial";
-                            _imageOverlayMat.SetInt("unity_GUIZTestMode", (int)UnityEngine.Rendering.CompareFunction.Always);
-                            _imageOverlayMat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
-                            _imageOverlayMat.renderQueue = 3000;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Plugin.Log?.LogWarning($"[TowerStatsMod] Failed to create ImageOverlayMaterial: {ex.Message}");
-                    }
-                }
-                return _imageOverlayMat!;
-            }
-        }
 
         // ─── State & Optimization ───────────────────────────────────────────
         private bool _initialized;
         private float _nextUIUpdate;
-        private float _nextDistanceCheck;
-        private bool _isVisibleByDistance = true;
         private float _lastRenderedDPS = -1f;
         private int _lastRenderedKills = -1;
 
@@ -124,7 +63,7 @@ namespace TowerStatsMod
         private void OnEnable()
         {
             TowerStatsManager.RegisterTower(this);
-            if (_initialized && (_canvas == null || _killsText == null))
+            if (_initialized && BadgeRectTransform == null)
             {
                 BuildUI();
             }
@@ -133,11 +72,21 @@ namespace TowerStatsMod
         private void OnDisable()
         {
             TowerStatsManager.UnregisterTower(this);
+            if (BadgeRectTransform != null)
+            {
+                Destroy(BadgeRectTransform.gameObject);
+                BadgeRectTransform = null;
+            }
         }
 
         private void OnDestroy()
         {
             TowerStatsManager.UnregisterTower(this);
+            if (BadgeRectTransform != null)
+            {
+                Destroy(BadgeRectTransform.gameObject);
+                BadgeRectTransform = null;
+            }
         }
 
         public void RecordDamage(float amount)
@@ -157,8 +106,8 @@ namespace TowerStatsMod
         {
             if (!Plugin.IsModEnabled || !_initialized) return;
 
-            // Self-heal UI if destroyed or missing
-            if (_canvas == null || _canvasRT == null || _killsText == null || _dpsText == null)
+            // Self-heal UI badge if missing
+            if (BadgeRectTransform == null || _killsText == null || _dpsText == null)
             {
                 BuildUI();
             }
@@ -179,7 +128,7 @@ namespace TowerStatsMod
             }
             CurrentDPS = window > 0.1f ? windowDmg / window : 0f;
 
-            // Refresh UI at 10Hz to save CPU
+            // Refresh UI content at 10Hz
             if (Time.time >= _nextUIUpdate)
             {
                 _nextUIUpdate = Time.time + 0.1f;
@@ -187,77 +136,19 @@ namespace TowerStatsMod
             }
         }
 
-        private void LateUpdate()
-        {
-            if (!Plugin.IsModEnabled || !_initialized || _canvas == null) return;
-
-            // Distance check rate-limited to 5Hz to prevent per-frame Canvas batch rebuilds
-            if (Time.time >= _nextDistanceCheck)
-            {
-                _nextDistanceCheck = Time.time + 0.2f;
-
-                float showRadius = Plugin.ShowRadius.Value;
-                Transform? playerT = TowerStatsManager.LocalPlayerTransform;
-                if (playerT != null && showRadius > 0f)
-                {
-                    float dist = Vector3.Distance(transform.position, playerT.position);
-                    _isVisibleByDistance = (dist <= showRadius);
-                }
-                else
-                {
-                    _isVisibleByDistance = true; // Stay visible during respawn / death
-                }
-
-                if (_canvas.gameObject.activeSelf != _isVisibleByDistance)
-                {
-                    _canvas.gameObject.SetActive(_isVisibleByDistance);
-                }
-            }
-
-            if (!_isVisibleByDistance) return;
-
-            // Camera facing rotation (without touching transform.localPosition/scale every frame!)
-            Camera? cam = GetMainCamera();
-            if (cam != null)
-            {
-                Vector3 dir = _canvas.transform.position - cam.transform.position;
-                if (dir != Vector3.zero)
-                {
-                    _canvas.transform.rotation = Quaternion.LookRotation(dir);
-                }
-            }
-        }
-
         private void BuildUI()
         {
-            // Destroy existing child canvas if any
-            var existingCanvas = transform.Find("TowerStatsCanvas");
-            if (existingCanvas != null)
+            if (BadgeRectTransform != null)
             {
-                DestroyImmediate(existingCanvas.gameObject);
+                DestroyImmediate(BadgeRectTransform.gameObject);
             }
 
-            // Create Canvas GameObject
-            var canvasGo = new GameObject("TowerStatsCanvas");
-            canvasGo.transform.SetParent(transform, false);
-
-            _canvas = canvasGo.AddComponent<Canvas>();
-            _canvas.renderMode = RenderMode.WorldSpace;
-            _canvas.overrideSorting = true;
-            _canvas.sortingOrder = 30000; // Highest sorting order
-
-            _canvasRT = canvasGo.GetComponent<RectTransform>();
-            _canvasRT.sizeDelta = new Vector2(100f, 52f); // Default initial size (will auto-expand)
-            
-            // Set scale & height offset ONCE during BuildUI (prevents Canvas mesh dirtying every frame!)
-            float scaleVal = Plugin.UiScale.Value;
-            _canvasRT.localScale = Vector3.one * scaleVal;
-
-            float heightOffset = Plugin.HeightOffset.Value;
-            _canvasRT.localPosition = new Vector3(0f, heightOffset, 0f);
+            // Create badge container inside single global root Canvas (0 extra Canvases!)
+            BadgeRectTransform = TowerStatsManager.Instance.CreateBadgeContainer($"TowerBadge_{gameObject.GetInstanceID()}");
+            BadgeRectTransform.sizeDelta = new Vector2(100f, 52f);
 
             // Sleek dark background panel
-            _bgImage = canvasGo.AddComponent<Image>();
+            _bgImage = BadgeRectTransform.gameObject.AddComponent<Image>();
             _bgImage.color = new Color(0.04f, 0.06f, 0.10f, 0.90f);
 
             Font mainFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
@@ -265,7 +156,7 @@ namespace TowerStatsMod
 
             // 1. Kills text (Top line)
             var killsGo = new GameObject("KillsLabel");
-            killsGo.transform.SetParent(canvasGo.transform, false);
+            killsGo.transform.SetParent(BadgeRectTransform, false);
             _killsText = killsGo.AddComponent<Text>();
             _killsText.font = mainFont;
             _killsText.fontSize = fontSz;
@@ -279,9 +170,9 @@ namespace TowerStatsMod
             killsRT.offsetMin = new Vector2(2f, 0f);
             killsRT.offsetMax = new Vector2(-2f, 0f);
 
-            // 2. DPS text (Bottom line, below Kills)
+            // 2. DPS text (Bottom line)
             var dpsGo = new GameObject("DPSLabel");
-            dpsGo.transform.SetParent(canvasGo.transform, false);
+            dpsGo.transform.SetParent(BadgeRectTransform, false);
             _dpsText = dpsGo.AddComponent<Text>();
             _dpsText.font = mainFont;
             _dpsText.fontSize = fontSz;
@@ -295,20 +186,12 @@ namespace TowerStatsMod
             dpsRT.offsetMin = new Vector2(2f, 0f);
             dpsRT.offsetMax = new Vector2(-2f, 0f);
 
-            // Assign static shared overlay materials ONCE during BuildUI
-            if (Plugin.RenderThrough.Value)
-            {
-                if (_bgImage != null) _bgImage.material = ImageOverlayMaterial;
-                if (_killsText != null) _killsText.material = TextOverlayMaterial;
-                if (_dpsText != null) _dpsText.material = TextOverlayMaterial;
-            }
-
             UpdateUIContent();
         }
 
         private void UpdateUIContent()
         {
-            if (_killsText == null || _dpsText == null || _canvasRT == null) return;
+            if (_killsText == null || _dpsText == null || BadgeRectTransform == null) return;
 
             // Avoid redundant string & UI preferredWidth recalculations
             if (Mathf.Abs(CurrentDPS - _lastRenderedDPS) < 0.1f && Kills == _lastRenderedKills)
@@ -319,7 +202,6 @@ namespace TowerStatsMod
             _lastRenderedDPS = CurrentDPS;
             _lastRenderedKills = Kills;
 
-            // Update font size dynamically if config changed
             int fontSz = Plugin.FontSize.Value;
             if (_killsText.fontSize != fontSz) _killsText.fontSize = fontSz;
             if (_dpsText.fontSize != fontSz) _dpsText.fontSize = fontSz;
@@ -327,17 +209,16 @@ namespace TowerStatsMod
             string dpsFormatted = FormatNumber(CurrentDPS);
             string killsFormatted = Kills.ToString(CultureInfo.InvariantCulture);
 
-            // Matched single-symbol unicode kerning
             _killsText.text = $"⚔ Kills: {killsFormatted}";
             _dpsText.text = $"⚡ DPS: {dpsFormatted}";
 
-            // Calculate exact preferred width for dynamic background box expansion
+            // Auto-expand background box width
             float preferredWidth = Mathf.Max(_killsText.preferredWidth, _dpsText.preferredWidth);
             float targetWidth = Mathf.Clamp(preferredWidth + 20f, 75f, 320f);
 
-            if (Mathf.Abs(_canvasRT.sizeDelta.x - targetWidth) > 1f)
+            if (Mathf.Abs(BadgeRectTransform.sizeDelta.x - targetWidth) > 1f)
             {
-                _canvasRT.sizeDelta = new Vector2(targetWidth, 52f);
+                BadgeRectTransform.sizeDelta = new Vector2(targetWidth, 52f);
             }
         }
 
@@ -347,13 +228,6 @@ namespace TowerStatsMod
             if (val < 1000f) return val.ToString("F0", CultureInfo.InvariantCulture);
             if (val < 1000000f) return (val / 1000f).ToString("F1", CultureInfo.InvariantCulture) + "k";
             return (val / 1000000f).ToString("F2", CultureInfo.InvariantCulture) + "M";
-        }
-
-        private Camera? GetMainCamera()
-        {
-            if (_cachedCam != null && _cachedCam.isActiveAndEnabled) return _cachedCam;
-            _cachedCam = Camera.main;
-            return _cachedCam;
         }
     }
 }
