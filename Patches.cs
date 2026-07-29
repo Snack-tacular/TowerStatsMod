@@ -149,13 +149,6 @@ namespace TowerStatsMod
             EnsureComponentAttachedToSpot(__instance, resetStats: true);
         }
 
-        [HarmonyPatch(typeof(BuildingSpot), "Build")]
-        [HarmonyPostfix]
-        private static void BuildingSpot_Build_Postfix(BuildingSpot __instance)
-        {
-            EnsureComponentAttachedToSpot(__instance, resetStats: true);
-        }
-
         [HarmonyPatch(typeof(BuildingDamageable), nameof(BuildingDamageable.Initialize))]
         [HarmonyPostfix]
         private static void BuildingDamageable_Initialize_Postfix(BuildingDamageable __instance, Unit owner)
