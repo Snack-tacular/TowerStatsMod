@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using HarmonyLib;
+using Unity.Netcode;
 using UnityEngine;
 
 namespace TowerStatsMod
@@ -82,7 +83,7 @@ namespace TowerStatsMod
             }
         }
 
-        // ─── Direct High-Performance Damage Hooks (0 Reflection) ─────────────
+        // ─── Host / Server Direct Damage Hooks (0 Reflection) ─────────────────
         [HarmonyPatch(typeof(SimpleDamageable), nameof(SimpleDamageable.TakeDamage))]
         [HarmonyPostfix]
         private static void SimpleDamageable_TakeDamage_Postfix(SimpleDamageable __instance, float amount, IDamageSource source)
@@ -117,7 +118,65 @@ namespace TowerStatsMod
             catch { }
         }
 
-        // ─── Direct High-Performance Kill Hook (0 Reflection) ────────────────
+        // ─── Non-Host Client Multiplayer Hit Receiver Hook ────────────────────
+        [HarmonyPatch(typeof(DamageBatchManager), "ApplyHitLocally")]
+        [HarmonyPostfix]
+        private static void DamageBatchManager_ApplyHitLocally_Postfix(ulong targetNetId, float damage, HitResultType type, bool isBuilding)
+        {
+            if (damage <= 0f) return;
+            try
+            {
+                if (NetworkManager.Singleton != null && NetworkManager.Singleton.SpawnManager != null)
+                {
+                    if (NetworkManager.Singleton.SpawnManager.SpawnedObjects.TryGetValue(targetNetId, out var netObj) && netObj != null)
+                    {
+                        Unit? tower = FindNearestTower(netObj.transform.position);
+                        if (tower != null)
+                        {
+                            var stats = GetOrCreateTowerStats(tower);
+                            if (stats != null)
+                            {
+                                stats.RecordDamage(damage);
+                            }
+
+                            var victimUnit = netObj.GetComponent<Unit>();
+                            if (victimUnit != null && (victimUnit.IsDead || (victimUnit.Damageable != null && victimUnit.Damageable.CurrentHealth <= 0f)))
+                            {
+                                stats?.RecordKill(1);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static Unit? FindNearestTower(Vector3 targetPos)
+        {
+            float minSqrDist = 1600f; // 40 units max range
+            Unit? bestTower = null;
+
+            var towers = TowerStatsManager.ActiveTowers;
+            for (int i = 0; i < towers.Count; i++)
+            {
+                var stats = towers[i];
+                if (stats == null) continue;
+                Unit u = stats.GetComponent<Unit>();
+                if (u != null && u.gameObject.activeInHierarchy)
+                {
+                    float sqrD = (u.transform.position - targetPos).sqrMagnitude;
+                    if (sqrD < minSqrDist)
+                    {
+                        minSqrDist = sqrD;
+                        bestTower = u;
+                    }
+                }
+            }
+
+            return bestTower;
+        }
+
+        // ─── Host / Server Direct Kill Hook (0 Reflection) ───────────────────
         [HarmonyPatch(typeof(PlayerStatisticsManager), "OnUnitKilled")]
         [HarmonyPostfix]
         private static void PlayerStatisticsManager_OnUnitKilled_Postfix(Unit victim, Unit killer)
