@@ -93,6 +93,8 @@ namespace TowerStatsMod
         // ─── State & Optimization ───────────────────────────────────────────
         private bool _initialized;
         private float _nextUIUpdate;
+        private float _nextDistanceCheck;
+        private bool _isVisibleByDistance = true;
         private float _lastRenderedDPS = -1f;
         private int _lastRenderedKills = -1;
 
@@ -187,40 +189,35 @@ namespace TowerStatsMod
 
         private void LateUpdate()
         {
-            if (!Plugin.IsModEnabled || !_initialized) return;
+            if (!Plugin.IsModEnabled || !_initialized || _canvas == null) return;
 
-            if (_canvas == null || _canvasRT == null)
+            // Distance check rate-limited to 5Hz to prevent per-frame Canvas batch rebuilds
+            if (Time.time >= _nextDistanceCheck)
             {
-                BuildUI();
-                if (_canvas == null || _canvasRT == null) return;
-            }
+                _nextDistanceCheck = Time.time + 0.2f;
 
-            Camera? cam = GetMainCamera();
-
-            // Distance check using pre-cached local player transform (0 GC Allocations!)
-            float showRadius = Plugin.ShowRadius.Value;
-            Transform? playerT = TowerStatsManager.LocalPlayerTransform;
-            if (playerT != null && showRadius > 0f)
-            {
-                float dist = Vector3.Distance(transform.position, playerT.position);
-                if (dist > showRadius)
+                float showRadius = Plugin.ShowRadius.Value;
+                Transform? playerT = TowerStatsManager.LocalPlayerTransform;
+                if (playerT != null && showRadius > 0f)
                 {
-                    if (_canvas.gameObject.activeSelf) _canvas.gameObject.SetActive(false);
-                    return;
+                    float dist = Vector3.Distance(transform.position, playerT.position);
+                    _isVisibleByDistance = (dist <= showRadius);
+                }
+                else
+                {
+                    _isVisibleByDistance = true; // Stay visible during respawn / death
+                }
+
+                if (_canvas.gameObject.activeSelf != _isVisibleByDistance)
+                {
+                    _canvas.gameObject.SetActive(_isVisibleByDistance);
                 }
             }
 
-            // If player is dead or respawning, playerT is null -> stay active and visible!
-            if (!_canvas.gameObject.activeSelf) _canvas.gameObject.SetActive(true);
+            if (!_isVisibleByDistance) return;
 
-            // Dynamic scale & position updates from config
-            float scaleVal = Plugin.UiScale.Value;
-            _canvasRT.localScale = Vector3.one * scaleVal;
-
-            float heightOffset = GetHeightOffset();
-            _canvasRT.localPosition = new Vector3(0f, heightOffset, 0f);
-
-            // Rotate canvas to face camera cleanly
+            // Camera facing rotation (without touching transform.localPosition/scale every frame!)
+            Camera? cam = GetMainCamera();
             if (cam != null)
             {
                 Vector3 dir = _canvas.transform.position - cam.transform.position;
@@ -252,10 +249,11 @@ namespace TowerStatsMod
             _canvasRT = canvasGo.GetComponent<RectTransform>();
             _canvasRT.sizeDelta = new Vector2(100f, 52f); // Default initial size (will auto-expand)
             
+            // Set scale & height offset ONCE during BuildUI (prevents Canvas mesh dirtying every frame!)
             float scaleVal = Plugin.UiScale.Value;
             _canvasRT.localScale = Vector3.one * scaleVal;
 
-            float heightOffset = GetHeightOffset();
+            float heightOffset = Plugin.HeightOffset.Value;
             _canvasRT.localPosition = new Vector3(0f, heightOffset, 0f);
 
             // Sleek dark background panel
@@ -297,7 +295,7 @@ namespace TowerStatsMod
             dpsRT.offsetMin = new Vector2(2f, 0f);
             dpsRT.offsetMax = new Vector2(-2f, 0f);
 
-            // Assign static shared overlay materials ONCE during BuildUI (0 allocations during update!)
+            // Assign static shared overlay materials ONCE during BuildUI
             if (Plugin.RenderThrough.Value)
             {
                 if (_bgImage != null) _bgImage.material = ImageOverlayMaterial;
@@ -306,11 +304,6 @@ namespace TowerStatsMod
             }
 
             UpdateUIContent();
-        }
-
-        private float GetHeightOffset()
-        {
-            return Plugin.HeightOffset.Value;
         }
 
         private void UpdateUIContent()

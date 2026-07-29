@@ -46,7 +46,7 @@ namespace TowerStatsMod
             return id;
         }
 
-        // ─── Filter: Player Hero Check ───────────────────────────────────────
+        // ─── Filter: Player Hero Check (0 Allocations) ───────────────────────
         public static bool IsPlayerHero(Unit? unit)
         {
             if (unit == null) return false;
@@ -83,73 +83,32 @@ namespace TowerStatsMod
             return false;
         }
 
-        // ─── Filter: Only Towers (Strictly exclude Barracks, Abode, House, Keep, Forge, etc.) ───
+        // ─── Filter: Only Towers (0 String Allocations, Direct Enum Checks) ───
         public static bool IsTower(Unit? unit)
         {
             if (unit == null || !unit.isBuilding) return false;
 
-            // 1. Check PlayerBuilding / HouseType / BuildingSize
+            // 1. Direct HouseType Enum Integer Check (0 String Allocations!)
             if (unit.playerBuilding != null)
             {
-                var pb = unit.playerBuilding;
-
-                // Explicit rejection of non-tower house types
-                if (pb.HouseType == HouseType.Barracks || 
-                    pb.HouseType == HouseType.Abode || 
-                    pb.HouseType == HouseType.House || 
-                    pb.HouseType == HouseType.Forge || 
-                    pb.HouseType == HouseType.Tavern || 
-                    pb.HouseType == HouseType.MarketPlace || 
-                    pb.HouseType == HouseType.Arsenal || 
-                    pb.HouseType == HouseType.Keep || 
-                    pb.HouseType == HouseType.Workshop || 
-                    pb.HouseType == HouseType.Builders_guild)
-                {
-                    return false;
-                }
-
-                string houseStr = pb.HouseType.ToString();
-                if (houseStr.IndexOf("Barracks", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    houseStr.IndexOf("Abode", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    houseStr.IndexOf("House", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    return false;
-                }
-
-                // Explicit inclusion of Tower & Catapult house types
-                if (houseStr.IndexOf("Tower", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    houseStr.IndexOf("Catapult", StringComparison.OrdinalIgnoreCase) >= 0)
+                var ht = unit.playerBuilding.HouseType;
+                if (ht == HouseType.Tower || 
+                    ht == HouseType.Tower_level2 || 
+                    ht == HouseType.Mage_Tower || 
+                    ht == HouseType.Catapult)
                 {
                     return true;
                 }
-
-                if (pb.BuildingSpot != null && pb.BuildingSpot.IsTowerSpot)
-                    return true;
-
-                if (pb.StatsEntry != null && pb.StatsEntry.buildingSize == BuildingSize.Tower)
-                    return true;
-
-                return false; // Reject any other building types
+                return false;
             }
 
-            // 2. Check for AutoTower component
+            // 2. AutoTower component check
             try
             {
-                if (unit.GetComponent<AutoTower>() != null || unit.GetComponentInParent<AutoTower>() != null)
+                if (unit.GetComponent<AutoTower>() != null)
                     return true;
             }
             catch { }
-
-            // 3. Name check fallback
-            if (!string.IsNullOrEmpty(unit.UnitName))
-            {
-                string name = unit.UnitName.ToLowerInvariant();
-                if (name.Contains("barrack") || name.Contains("abode") || name.Contains("house") || name.Contains("keep"))
-                    return false;
-
-                if (name.Contains("tower") || name.Contains("catapult") || name.Contains("turret") || name.Contains("ballista"))
-                    return true;
-            }
 
             return false;
         }
@@ -170,12 +129,11 @@ namespace TowerStatsMod
             }
             catch { }
 
-            // 2. Deep Reflection check for projectiles & weapons (sourceWeapon, _owner, owner, Owner, etc.)
+            // 2. Reflection check for projectiles & weapons (sourceWeapon, _owner, owner, Owner, etc.)
             try
             {
                 Type type = source.GetType();
 
-                // Check 'Owner' or 'SourceUnit' properties
                 var ownerProp = type.GetProperty("Owner") ?? type.GetProperty("SourceUnit");
                 if (ownerProp != null)
                 {
@@ -183,7 +141,6 @@ namespace TowerStatsMod
                     if (u != null && IsTower(u)) return u;
                 }
 
-                // Check '_owner', 'owner', '_sourceUnit' fields
                 var ownerField = type.GetField("_owner", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
                               ?? type.GetField("owner", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
                               ?? type.GetField("_sourceUnit", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
@@ -193,7 +150,6 @@ namespace TowerStatsMod
                     if (u != null && IsTower(u)) return u;
                 }
 
-                // Check 'sourceWeapon' field (for projectiles like ImpactProjectile, WeaponProjectile, etc.)
                 var swField = type.GetField("sourceWeapon", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
                            ?? type.GetField("_sourceWeapon", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 if (swField != null)
@@ -348,7 +304,6 @@ namespace TowerStatsMod
 
             if (killer != null && IsPlayerHero(killer))
             {
-                // Hero dealt the killing blow -> Clear tower attacker record so hero kills are never stolen
                 _lastTowerAttacker.Remove(victimId);
                 return;
             }
@@ -400,7 +355,6 @@ namespace TowerStatsMod
 
             int victimId = GetVictimEntityId(victimComponent);
 
-            // If damage is from a Player Hero -> Clear tower attacker tracking so player kills are never miscredited to towers
             if (IsHeroDamage(source))
             {
                 _lastTowerAttacker.Remove(victimId);
@@ -418,7 +372,6 @@ namespace TowerStatsMod
                     stats.RecordDamage(amount);
                 }
 
-                // Check if victim died from this tower's damage
                 if (victimComponent is SimpleDamageable sd)
                 {
                     if (sd.CurrentHealth <= 0f || sd.IsDead)
