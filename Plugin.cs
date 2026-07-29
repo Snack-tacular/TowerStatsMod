@@ -7,9 +7,13 @@ using UnityEngine;
 
 namespace TowerStatsMod
 {
-    [BepInPlugin("com.antigravity.towerstatsmod", "Tower Stats Mod", "1.0.0")]
+    [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
     public class Plugin : BaseUnityPlugin
     {
+        public const string PluginGuid = "com.antigravity.towerstatsmod";
+        public const string PluginName = "Tower Stats Mod";
+        public const string PluginVersion = "1.0.10";
+
         public static Plugin Instance { get; private set; } = null!;
         internal static ManualLogSource Log { get; private set; } = null!;
 
@@ -34,10 +38,10 @@ namespace TowerStatsMod
 
             BindConfig();
 
-            _harmony = new Harmony("com.antigravity.towerstatsmod");
+            _harmony = new Harmony(PluginGuid);
             _harmony.PatchAll(typeof(Patches));
 
-            Log.LogInfo("🏰 Tower Stats Mod initialized! Press F6 to toggle stats display.");
+            Log.LogInfo($"🏰 Tower Stats Mod v{PluginVersion} initialized! Press F6 to toggle stats display.");
         }
 
         private void Update()
