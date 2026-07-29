@@ -32,9 +32,8 @@ namespace TowerStatsMod
         private Text? _dpsText;
         private Image? _bgImage;
         private Camera? _cachedCam;
-        private static Transform? _cachedPlayerTransform;
 
-        // ─── Overlay Materials (Render through 3D geometry like BuildingLevelDisplay) ──
+        // ─── Shared Overlay Materials (Created ONCE for 0 Allocation Overhead) ──
         private static Material? _textOverlayMat;
         public static Material TextOverlayMaterial
         {
@@ -198,9 +197,9 @@ namespace TowerStatsMod
 
             Camera? cam = GetMainCamera();
 
-            // Distance check relative to THIS CLIENT'S local player character
+            // Distance check using pre-cached local player transform (0 GC Allocations!)
             float showRadius = Plugin.ShowRadius.Value;
-            Transform? playerT = GetPlayerTransform();
+            Transform? playerT = TowerStatsManager.LocalPlayerTransform;
             if (playerT != null && showRadius > 0f)
             {
                 float dist = Vector3.Distance(transform.position, playerT.position);
@@ -298,28 +297,15 @@ namespace TowerStatsMod
             dpsRT.offsetMin = new Vector2(2f, 0f);
             dpsRT.offsetMax = new Vector2(-2f, 0f);
 
-            // Apply Render Through overlay materials
-            ApplyOverlayMaterials();
+            // Assign static shared overlay materials ONCE during BuildUI (0 allocations during update!)
+            if (Plugin.RenderThrough.Value)
+            {
+                if (_bgImage != null) _bgImage.material = ImageOverlayMaterial;
+                if (_killsText != null) _killsText.material = TextOverlayMaterial;
+                if (_dpsText != null) _dpsText.material = TextOverlayMaterial;
+            }
 
             UpdateUIContent();
-        }
-
-        private void ApplyOverlayMaterials()
-        {
-            if (!Plugin.RenderThrough.Value) return;
-
-            Material imgMat = ImageOverlayMaterial;
-            if (imgMat != null && _bgImage != null)
-            {
-                _bgImage.material = imgMat;
-            }
-
-            Material txtMat = TextOverlayMaterial;
-            if (txtMat != null)
-            {
-                if (_killsText != null) _killsText.material = txtMat;
-                if (_dpsText != null) _dpsText.material = txtMat;
-            }
         }
 
         private float GetHeightOffset()
@@ -331,12 +317,19 @@ namespace TowerStatsMod
         {
             if (_killsText == null || _dpsText == null || _canvasRT == null) return;
 
+            // Avoid redundant string & UI preferredWidth recalculations
+            if (Mathf.Abs(CurrentDPS - _lastRenderedDPS) < 0.1f && Kills == _lastRenderedKills)
+            {
+                return;
+            }
+
+            _lastRenderedDPS = CurrentDPS;
+            _lastRenderedKills = Kills;
+
             // Update font size dynamically if config changed
             int fontSz = Plugin.FontSize.Value;
             if (_killsText.fontSize != fontSz) _killsText.fontSize = fontSz;
             if (_dpsText.fontSize != fontSz) _dpsText.fontSize = fontSz;
-
-            ApplyOverlayMaterials();
 
             string dpsFormatted = FormatNumber(CurrentDPS);
             string killsFormatted = Kills.ToString(CultureInfo.InvariantCulture);
@@ -353,9 +346,6 @@ namespace TowerStatsMod
             {
                 _canvasRT.sizeDelta = new Vector2(targetWidth, 52f);
             }
-
-            _lastRenderedDPS = CurrentDPS;
-            _lastRenderedKills = Kills;
         }
 
         public static string FormatNumber(float val)
@@ -371,85 +361,6 @@ namespace TowerStatsMod
             if (_cachedCam != null && _cachedCam.isActiveAndEnabled) return _cachedCam;
             _cachedCam = Camera.main;
             return _cachedCam;
-        }
-
-        private static Transform? GetPlayerTransform()
-        {
-            // 1. Validate cached local player transform
-            if (_cachedPlayerTransform != null)
-            {
-                try
-                {
-                    if (_cachedPlayerTransform.gameObject != null && _cachedPlayerTransform.gameObject.activeInHierarchy)
-                    {
-                        var u = _cachedPlayerTransform.GetComponent<Unit>();
-                        if (u != null && !u.IsDead && u.IsLocalPlayer)
-                        {
-                            return _cachedPlayerTransform;
-                        }
-                    }
-                }
-                catch { }
-                _cachedPlayerTransform = null; // Stale or dead reference
-            }
-
-            // 2. Search Units for IsLocalPlayer == true
-            try
-            {
-                var units = FindObjectsByType<Unit>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
-                if (units != null)
-                {
-                    foreach (var u in units)
-                    {
-                        if (u != null && u.gameObject.activeInHierarchy && !u.IsDead && u.IsLocalPlayer)
-                        {
-                            _cachedPlayerTransform = u.transform;
-                            return _cachedPlayerTransform;
-                        }
-                    }
-                }
-            }
-            catch { }
-
-            // 3. Search PlayerInteract for IsLocalPlayer == true
-            try
-            {
-                var interacts = FindObjectsByType<PlayerInteract>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
-                if (interacts != null)
-                {
-                    foreach (var pi in interacts)
-                    {
-                        if (pi != null && pi.gameObject.activeInHierarchy && pi.IsLocalPlayer)
-                        {
-                            var u = pi.GetComponent<Unit>();
-                            if (u == null || !u.IsDead)
-                            {
-                                _cachedPlayerTransform = pi.transform;
-                                return _cachedPlayerTransform;
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-
-            // 4. Fallback to PlayerGameDataManager
-            try
-            {
-                var pgm = PlayerGameDataManager.I;
-                if (pgm != null)
-                {
-                    var hero = pgm.GetLocalPlayerUnit();
-                    if (hero != null && hero.gameObject.activeInHierarchy && !hero.IsDead)
-                    {
-                        _cachedPlayerTransform = hero.transform;
-                        return _cachedPlayerTransform;
-                    }
-                }
-            }
-            catch { }
-
-            return null;
         }
     }
 }

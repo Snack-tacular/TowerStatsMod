@@ -11,27 +11,39 @@ namespace TowerStatsMod
     {
         private static readonly Dictionary<int, Unit> _lastTowerAttacker = new Dictionary<int, Unit>();
         private static readonly HashSet<int> _creditedKills = new HashSet<int>();
+        private static readonly Dictionary<int, Unit?> _unitComponentCache = new Dictionary<int, Unit?>();
 
         public static void ResetVictimState(int victimId)
         {
             _creditedKills.Remove(victimId);
             _lastTowerAttacker.Remove(victimId);
+            _unitComponentCache.Remove(victimId);
         }
 
-        // ─── Unified Victim GameObject Instance ID (Prevents +2 Double Counting) ───
+        // ─── Fast Cached Victim GameObject Instance ID ───────────────────────
         public static int GetVictimEntityId(Component? comp)
         {
             if (comp == null) return 0;
             if (comp is Unit uDirect) return uDirect.gameObject.GetInstanceID();
 
+            int id = comp.gameObject.GetInstanceID();
+            if (_unitComponentCache.TryGetValue(id, out var cachedUnit))
+            {
+                return cachedUnit != null ? cachedUnit.gameObject.GetInstanceID() : id;
+            }
+
             try
             {
                 var u = comp.GetComponent<Unit>() ?? comp.GetComponentInParent<Unit>();
+                _unitComponentCache[id] = u;
                 if (u != null) return u.gameObject.GetInstanceID();
             }
-            catch { }
+            catch
+            {
+                _unitComponentCache[id] = null;
+            }
 
-            return comp.gameObject.GetInstanceID();
+            return id;
         }
 
         // ─── Filter: Player Hero Check ───────────────────────────────────────
@@ -524,6 +536,7 @@ namespace TowerStatsMod
             TowerStatsManager.Clear();
             _lastTowerAttacker.Clear();
             _creditedKills.Clear();
+            _unitComponentCache.Clear();
         }
     }
 }
