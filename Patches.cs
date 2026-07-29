@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using Unity.Netcode;
 using UnityEngine;
@@ -12,6 +13,11 @@ namespace TowerStatsMod
         private static readonly Dictionary<int, Unit> _lastTowerAttacker = new Dictionary<int, Unit>();
         private static readonly HashSet<int> _creditedKills = new HashSet<int>();
         private static readonly Dictionary<int, Unit?> _unitComponentCache = new Dictionary<int, Unit?>();
+        private static readonly HashSet<int> _towerUnitIds = new HashSet<int>();
+
+        // ─── Fast Damage Source Resolution Cache (0 Reflection on Repeated Hits!) ───
+        private static readonly ConditionalWeakTable<IDamageSource, Unit> _sourceTowerCache = new ConditionalWeakTable<IDamageSource, Unit>();
+        private static readonly ConditionalWeakTable<IDamageSource, object> _sourceHeroCache = new ConditionalWeakTable<IDamageSource, object>();
 
         public static void ResetVictimState(int victimId)
         {
@@ -59,11 +65,16 @@ namespace TowerStatsMod
         public static bool IsHeroDamage(IDamageSource? source)
         {
             if (source == null) return false;
+            if (_sourceHeroCache.TryGetValue(source, out _)) return true;
 
             try
             {
                 Unit u = source.SourceUnit;
-                if (u != null && IsPlayerHero(u)) return true;
+                if (u != null && IsPlayerHero(u))
+                {
+                    _sourceHeroCache.Add(source, null!);
+                    return true;
+                }
             }
             catch { }
 
@@ -72,10 +83,18 @@ namespace TowerStatsMod
                 try
                 {
                     var pi = comp.GetComponentInParent<PlayerInteract>();
-                    if (pi != null) return true;
+                    if (pi != null)
+                    {
+                        _sourceHeroCache.Add(source, null!);
+                        return true;
+                    }
 
                     var parentUnit = comp.GetComponentInParent<Unit>();
-                    if (parentUnit != null && IsPlayerHero(parentUnit)) return true;
+                    if (parentUnit != null && IsPlayerHero(parentUnit))
+                    {
+                        _sourceHeroCache.Add(source, null!);
+                        return true;
+                    }
                 }
                 catch { }
             }
@@ -83,12 +102,15 @@ namespace TowerStatsMod
             return false;
         }
 
-        // ─── Filter: Only Towers (0 String Allocations, Direct Enum Checks) ───
+        // ─── Filter: Only Towers (O(1) Hash Lookup, 0 String Allocations) ───
         public static bool IsTower(Unit? unit)
         {
             if (unit == null || !unit.isBuilding) return false;
 
-            // 1. Direct HouseType Enum Integer Check (0 String Allocations!)
+            int id = unit.gameObject.GetInstanceID();
+            if (_towerUnitIds.Contains(id)) return true;
+
+            // Direct HouseType Enum Integer Check (0 String Allocations!)
             if (unit.playerBuilding != null)
             {
                 var ht = unit.playerBuilding.HouseType;
@@ -97,30 +119,51 @@ namespace TowerStatsMod
                     ht == HouseType.Mage_Tower || 
                     ht == HouseType.Catapult)
                 {
+                    _towerUnitIds.Add(id);
                     return true;
                 }
                 return false;
             }
 
-            // 2. AutoTower component check
+            // AutoTower component check
             try
             {
                 if (unit.GetComponent<AutoTower>() != null)
+                {
+                    _towerUnitIds.Add(id);
                     return true;
+                }
             }
             catch { }
 
             return false;
         }
 
-        // ─── Deep Resolution: Tower Unit from IDamageSource / Projectile ─────
+        // ─── Deep Resolution: Tower Unit from IDamageSource (Cached = 0 Reflection) ───
         public static Unit? ResolveTowerUnit(IDamageSource? source)
         {
             if (source == null) return null;
 
+            // Fast Cache Check (0 Reflection & 0 GetComponentInParent per hit!)
+            if (_sourceTowerCache.TryGetValue(source, out var cachedTower))
+            {
+                return cachedTower;
+            }
+
             // Reject hero damage early
             if (IsHeroDamage(source)) return null;
 
+            Unit? resolvedTower = UncachedResolveTowerUnit(source);
+            if (resolvedTower != null)
+            {
+                _sourceTowerCache.Add(source, resolvedTower);
+            }
+
+            return resolvedTower;
+        }
+
+        private static Unit? UncachedResolveTowerUnit(IDamageSource source)
+        {
             // 1. Direct SourceUnit property check
             try
             {
@@ -157,7 +200,7 @@ namespace TowerStatsMod
                     var sw = swField.GetValue(source) as IDamageSource;
                     if (sw != null && sw != source)
                     {
-                        var resolvedFromSw = ResolveTowerUnit(sw);
+                        var resolvedFromSw = UncachedResolveTowerUnit(sw);
                         if (resolvedFromSw != null) return resolvedFromSw;
                     }
                 }
@@ -423,54 +466,6 @@ namespace TowerStatsMod
             EnsureComponentAttachedToSpot(__instance, resetStats: true);
         }
 
-        [HarmonyPatch(typeof(Unit), "OnEnable")]
-        [HarmonyPostfix]
-        private static void Unit_OnEnable_Postfix(Unit __instance)
-        {
-            if (__instance != null)
-            {
-                int id = GetVictimEntityId(__instance);
-                ResetVictimState(id);
-
-                if (IsTower(__instance))
-                {
-                    GetOrCreateTowerStats(__instance, resetStats: true);
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(UnitManager), nameof(UnitManager.RegisterUnit))]
-        [HarmonyPostfix]
-        private static void UnitManager_RegisterUnit_Postfix(Unit unit)
-        {
-            if (unit != null)
-            {
-                int id = GetVictimEntityId(unit);
-                ResetVictimState(id);
-
-                if (IsTower(unit))
-                {
-                    GetOrCreateTowerStats(unit);
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(Unit), nameof(Unit.OnNetworkSpawn))]
-        [HarmonyPostfix]
-        private static void Unit_OnNetworkSpawn_Postfix(Unit __instance)
-        {
-            if (__instance != null)
-            {
-                int id = GetVictimEntityId(__instance);
-                ResetVictimState(id);
-
-                if (IsTower(__instance))
-                {
-                    GetOrCreateTowerStats(__instance);
-                }
-            }
-        }
-
         [HarmonyPatch(typeof(BuildingDamageable), nameof(BuildingDamageable.Initialize))]
         [HarmonyPostfix]
         private static void BuildingDamageable_Initialize_Postfix(BuildingDamageable __instance, Unit owner)
@@ -490,6 +485,7 @@ namespace TowerStatsMod
             _lastTowerAttacker.Clear();
             _creditedKills.Clear();
             _unitComponentCache.Clear();
+            _towerUnitIds.Clear();
         }
     }
 }

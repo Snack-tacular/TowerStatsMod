@@ -122,6 +122,8 @@ namespace TowerStatsMod
 
         private void OnGUI()
         {
+            // CRITICAL PERFORMANCE FIX: Only execute during Repaint event! Ignore Layout, MouseMove, etc.
+            if (Event.current.type != EventType.Repaint) return;
             if (!Plugin.IsModEnabled || _activeTowers.Count == 0) return;
 
             Camera? cam = GetMainCamera();
@@ -163,7 +165,7 @@ namespace TowerStatsMod
                 float height = 48f;
                 Rect boxRect = new Rect(guiX - (width * 0.5f), guiY - (height * 0.5f), width, height);
 
-                // Draw sleek dark background box (Immediate mode = 0 Canvas overhead!)
+                // Draw sleek dark background box (Repaint only = 0 extra calls!)
                 GUI.Box(boxRect, GUIContent.none, _boxStyle!);
 
                 // Draw 2-line text overlay
