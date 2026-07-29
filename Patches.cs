@@ -34,6 +34,43 @@ namespace TowerStatsMod
             return comp.gameObject.GetInstanceID();
         }
 
+        // ─── Filter: Player Hero Check ───────────────────────────────────────
+        public static bool IsPlayerHero(Unit? unit)
+        {
+            if (unit == null) return false;
+            if (unit.isBuilding) return false;
+            if (unit.IsPlayerControlled) return true;
+            if (unit.GetComponent<PlayerInteract>() != null) return true;
+            return false;
+        }
+
+        public static bool IsHeroDamage(IDamageSource? source)
+        {
+            if (source == null) return false;
+
+            try
+            {
+                Unit u = source.SourceUnit;
+                if (u != null && IsPlayerHero(u)) return true;
+            }
+            catch { }
+
+            if (source is Component comp)
+            {
+                try
+                {
+                    var pi = comp.GetComponentInParent<PlayerInteract>();
+                    if (pi != null) return true;
+
+                    var parentUnit = comp.GetComponentInParent<Unit>();
+                    if (parentUnit != null && IsPlayerHero(parentUnit)) return true;
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
         // ─── Filter: Only Towers (Strictly exclude Barracks, Abode, House, Keep, Forge, etc.) ───
         public static bool IsTower(Unit? unit)
         {
@@ -109,6 +146,9 @@ namespace TowerStatsMod
         public static Unit? ResolveTowerUnit(IDamageSource? source)
         {
             if (source == null) return null;
+
+            // Reject hero damage early
+            if (IsHeroDamage(source)) return null;
 
             // 1. Direct SourceUnit property check
             try
@@ -250,29 +290,6 @@ namespace TowerStatsMod
             }
         }
 
-        private static Unit? FindNearestAttackingTower(Vector3 targetPos)
-        {
-            float minSqDist = 2500f; // Max search radius 50 units (50*50 = 2500)
-            Unit? bestTower = null;
-
-            foreach (var stats in TowerStatsManager.ActiveTowers)
-            {
-                if (stats == null) continue;
-                Unit u = stats.GetComponent<Unit>();
-                if (u != null && IsTower(u) && u.gameObject.activeInHierarchy)
-                {
-                    float sqrD = (u.transform.position - targetPos).sqrMagnitude;
-                    if (sqrD < minSqDist)
-                    {
-                        minSqDist = sqrD;
-                        bestTower = u;
-                    }
-                }
-            }
-
-            return bestTower;
-        }
-
         // ─── Non-Host Client Multiplayer Hit Receiver Hook ────────────────────
         [HarmonyPatch(typeof(DamageBatchManager), "ApplyHitLocally")]
         [HarmonyPostfix]
@@ -288,19 +305,8 @@ namespace TowerStatsMod
                     {
                         int victimId = GetVictimEntityId(netObj);
 
-                        Unit? tower = null;
-                        _lastTowerAttacker.TryGetValue(victimId, out tower);
-
-                        if (tower == null)
-                        {
-                            tower = FindNearestAttackingTower(netObj.transform.position);
-                            if (tower != null)
-                            {
-                                _lastTowerAttacker[victimId] = tower;
-                            }
-                        }
-
-                        if (tower != null)
+                        _lastTowerAttacker.TryGetValue(victimId, out var tower);
+                        if (tower != null && IsTower(tower))
                         {
                             var stats = GetOrCreateTowerStats(tower);
                             if (stats != null)
@@ -327,6 +333,13 @@ namespace TowerStatsMod
         {
             if (victim == null) return;
             int victimId = GetVictimEntityId(victim);
+
+            if (killer != null && IsPlayerHero(killer))
+            {
+                // Hero dealt the killing blow -> Clear tower attacker record so hero kills are never stolen
+                _lastTowerAttacker.Remove(victimId);
+                return;
+            }
 
             Unit? tower = killer;
             if (tower == null || !IsTower(tower))
@@ -373,10 +386,17 @@ namespace TowerStatsMod
         {
             if (victimComponent == null || amount <= 0f) return;
 
-            Unit? tower = ResolveTowerUnit(source);
             int victimId = GetVictimEntityId(victimComponent);
 
-            if (tower != null)
+            // If damage is from a Player Hero -> Clear tower attacker tracking so player kills are never miscredited to towers
+            if (IsHeroDamage(source))
+            {
+                _lastTowerAttacker.Remove(victimId);
+                return;
+            }
+
+            Unit? tower = ResolveTowerUnit(source);
+            if (tower != null && IsTower(tower))
             {
                 _lastTowerAttacker[victimId] = tower;
 
@@ -385,15 +405,14 @@ namespace TowerStatsMod
                 {
                     stats.RecordDamage(amount);
                 }
-            }
 
-            // Check if victim died from this damage
-            if (victimComponent is SimpleDamageable sd)
-            {
-                if (sd.CurrentHealth <= 0f || sd.IsDead)
+                // Check if victim died from this tower's damage
+                if (victimComponent is SimpleDamageable sd)
                 {
-                    if (tower == null) _lastTowerAttacker.TryGetValue(victimId, out tower);
-                    TryCreditKill(victimId, tower);
+                    if (sd.CurrentHealth <= 0f || sd.IsDead)
+                    {
+                        TryCreditKill(victimId, tower);
+                    }
                 }
             }
         }
@@ -406,13 +425,22 @@ namespace TowerStatsMod
             if (__instance == null) return;
             int victimId = GetVictimEntityId(__instance);
 
+            if (IsHeroDamage(source))
+            {
+                _lastTowerAttacker.Remove(victimId);
+                return;
+            }
+
             Unit? tower = ResolveTowerUnit(source);
             if (tower == null)
             {
                 _lastTowerAttacker.TryGetValue(victimId, out tower);
             }
 
-            TryCreditKill(victimId, tower);
+            if (tower != null && IsTower(tower))
+            {
+                TryCreditKill(victimId, tower);
+            }
         }
 
         // ─── Building & Unit Spawning / Rebuilding Hooks ─────────────────────
